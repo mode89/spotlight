@@ -2,8 +2,9 @@
 
 import pytest
 from unittest.mock import Mock, patch
+import requests
 import spotlight
-from spotlight import get_total_pages, get_page
+from spotlight import get_total_pages, get_page, get_image_info
 
 
 @patch("spotlight.requests.get")
@@ -439,3 +440,442 @@ def test_get_page_empty_page(mock_get):
 
     assert result == []
     mock_get.assert_called_once()
+
+
+@patch("spotlight.requests.get")
+def test_get_image_info_complete_valid_html(mock_get):
+    """Test successful extraction of all fields from well-formed page."""
+    html_content = """
+    <html>
+    <head>
+        <meta property="og:title" content="Sunset over Mountains">
+        <meta property="og:image" content="https://windows10spotlight.com/og.jpg">
+        <meta property="og:description" content="Beautiful sunset">
+    </head>
+    <body>
+        <article class="post-12345 type-post status-publish">
+            <h1>Sunset over Mountains at Dusk</h1>
+            <time datetime="2024-01-15T10:30:00Z">January 15, 2024</time>
+            <a href="/tag/sunset" rel="tag">sunset</a>
+            <a href="/tag/mountains" rel="tag">mountains</a>
+            <img src="https://windows10spotlight.com/wp-content/uploads/sunset.jpg"
+                 srcset="https://windows10spotlight.com/wp-content/uploads/sunset-1920x1080.jpg 1920w,
+                         https://windows10spotlight.com/wp-content/uploads/sunset-1280x720.jpg 1280w"
+                 alt="sunset-over-mountains">
+        </article>
+    </body>
+    </html>
+    """
+    mock_response = Mock()
+    mock_response.text = html_content
+    mock_response.raise_for_status = Mock()
+    mock_get.return_value = mock_response
+
+    result = get_image_info(12345)
+
+    assert result["id"] == 12345
+    assert result["title"] == "Sunset over Mountains at Dusk"
+    assert result["full_resolution_url"] == (
+        "https://windows10spotlight.com/wp-content/uploads/sunset-1920x1080.jpg"
+    )
+    assert result["tags"] == ["sunset", "mountains"]
+    assert result["date"] == "January 15, 2024"
+    assert result["datetime"] == "2024-01-15T10:30:00Z"
+    assert result["og_metadata"]["og:title"] == "Sunset over Mountains"
+    assert result["og_metadata"]["og:image"] == (
+        "https://windows10spotlight.com/og.jpg"
+    )
+    assert result["og_metadata"]["og:description"] == "Beautiful sunset"
+    assert len(result["all_images"]) == 1
+    assert result["all_images"][0]["width"] == 1920
+    mock_get.assert_called_once_with(
+        "https://windows10spotlight.com/images/12345",
+        headers=spotlight.HEADERS
+    )
+
+
+@patch("spotlight.requests.get")
+def test_get_image_info_multiple_images_with_srcset(mock_get):
+    """Test multiple images with landscape and portrait variants."""
+    html_content = """
+    <html>
+    <body>
+        <article class="post-999 type-post">
+            <h1>Nature Photography</h1>
+            <time datetime="2024-02-20T14:00:00Z">February 20, 2024</time>
+            <img src="https://windows10spotlight.com/wp-content/uploads/landscape.jpg"
+                 srcset="https://windows10spotlight.com/wp-content/uploads/landscape-2560x1440.jpg 2560w,
+                         https://windows10spotlight.com/wp-content/uploads/landscape-1920x1080.jpg 1920w"
+                 alt="landscape-view">
+            <img src="https://windows10spotlight.com/wp-content/uploads/portrait.jpg"
+                 srcset="https://windows10spotlight.com/wp-content/uploads/portrait-1080x1920.jpg 1920w,
+                         https://windows10spotlight.com/wp-content/uploads/portrait-720x1280.jpg 1280w"
+                 alt="portrait-view">
+        </article>
+    </body>
+    </html>
+    """
+    mock_response = Mock()
+    mock_response.text = html_content
+    mock_response.raise_for_status = Mock()
+    mock_get.return_value = mock_response
+
+    result = get_image_info(999)
+
+    assert len(result["all_images"]) == 2
+    assert result["all_images"][0]["url"] == (
+        "https://windows10spotlight.com/wp-content/uploads/landscape-2560x1440.jpg"
+    )
+    assert result["all_images"][0]["width"] == 2560
+    assert result["all_images"][0]["alt"] == "landscape-view"
+    assert result["all_images"][1]["url"] == (
+        "https://windows10spotlight.com/wp-content/uploads/portrait-1080x1920.jpg"
+    )
+    assert result["all_images"][1]["width"] == 1920
+    assert result["all_images"][1]["alt"] == "portrait-view"
+    assert result["full_resolution_url"] == result["all_images"][0]["url"]
+
+
+@patch("spotlight.requests.get")
+def test_get_image_info_fallbacks(mock_get):
+    """Test fallback to h2 title and image without srcset."""
+    html_content = """
+    <html>
+    <body>
+        <article class="post-777 type-post">
+            <h2>Fallback Title</h2>
+            <span class="date" datetime="2024-03-10T09:00:00Z">
+                March 10, 2024
+            </span>
+            <img src="https://windows10spotlight.com/wp-content/uploads/nosrcset.jpg"
+                 alt="no-srcset-image">
+        </article>
+    </body>
+    </html>
+    """
+    mock_response = Mock()
+    mock_response.text = html_content
+    mock_response.raise_for_status = Mock()
+    mock_get.return_value = mock_response
+
+    result = get_image_info(777)
+
+    assert result["title"] == "Fallback Title"
+    assert result["date"] == "March 10, 2024"
+    assert result["datetime"] == "2024-03-10T09:00:00Z"
+    assert len(result["all_images"]) == 1
+    assert result["all_images"][0]["url"] == (
+        "https://windows10spotlight.com/wp-content/uploads/nosrcset.jpg"
+    )
+    assert result["all_images"][0]["width"] is None
+    assert result["full_resolution_url"] == (
+        "https://windows10spotlight.com/wp-content/uploads/nosrcset.jpg"
+    )
+
+
+@patch("spotlight.requests.get")
+def test_get_image_info_missing_fields(mock_get):
+    """Test missing article, title, tags, and date all return None/empty."""
+    html_content = """
+    <html>
+    <body>
+        <div>No article element here</div>
+        <h2>Orphaned Title</h2>
+        <p>Some content without tags or dates</p>
+        <img src="https://windows10spotlight.com/wp-content/uploads/test.jpg"
+             alt="test">
+    </body>
+    </html>
+    """
+    mock_response = Mock()
+    mock_response.text = html_content
+    mock_response.raise_for_status = Mock()
+    mock_get.return_value = mock_response
+
+    result = get_image_info(9999)
+
+    # Falls back to passed image_id when no article/post-id found
+    assert result["id"] == 9999
+    # h2 should be found as fallback title
+    assert result["title"] == "Orphaned Title"
+    assert result["tags"] == []
+    assert result["date"] is None
+    assert result["datetime"] is None
+    assert result["og_metadata"] == {}
+
+
+@patch("spotlight.requests.get")
+def test_get_image_info_srcset_edge_cases(mock_get):
+    """Test empty srcset, malformed entries, and whitespace handling."""
+    html_content = """
+    <html>
+    <body>
+        <article class="post-500 type-post">
+            <h1>Srcset Edge Cases</h1>
+            <img src="https://windows10spotlight.com/wp-content/uploads/empty.jpg"
+                 srcset=""
+                 alt="empty-srcset">
+            <img src="https://windows10spotlight.com/wp-content/uploads/malformed.jpg"
+                 srcset="https://windows10spotlight.com/wp-content/uploads/malformed.jpg invalidw,
+                         https://windows10spotlight.com/wp-content/uploads/valid.jpg 1920w"
+                 alt="malformed-srcset">
+            <img src="https://windows10spotlight.com/wp-content/uploads/whitespace.jpg"
+                 srcset="  https://windows10spotlight.com/wp-content/uploads/whitespace-1280x720.jpg   1280w  ,
+                         https://windows10spotlight.com/wp-content/uploads/whitespace-1920x1080.jpg 1920w  "
+                 alt="whitespace-srcset">
+        </article>
+    </body>
+    </html>
+    """
+    mock_response = Mock()
+    mock_response.text = html_content
+    mock_response.raise_for_status = Mock()
+    mock_get.return_value = mock_response
+
+    result = get_image_info(500)
+
+    # Empty srcset should fall back to src
+    assert result["all_images"][0]["url"] == (
+        "https://windows10spotlight.com/wp-content/uploads/empty.jpg"
+    )
+    assert result["all_images"][0]["width"] is None
+
+    # Malformed entry should be skipped, only valid entry parsed
+    assert result["all_images"][1]["url"] == (
+        "https://windows10spotlight.com/wp-content/uploads/valid.jpg"
+    )
+    assert result["all_images"][1]["width"] == 1920
+
+    # Whitespace should be handled correctly
+    assert result["all_images"][2]["url"] == (
+        "https://windows10spotlight.com/wp-content/uploads/whitespace-1920x1080.jpg"
+    )
+    assert result["all_images"][2]["width"] == 1920
+
+
+@patch("spotlight.requests.get")
+def test_get_image_info_image_filtering(mock_get):
+    """Test filtering of wp-content images and mixed valid/invalid images."""
+    html_content = """
+    <html>
+    <body>
+        <article class="post-600 type-post">
+            <h1>Image Filtering Test</h1>
+            <img src="https://external-cdn.com/banner.jpg" alt="external">
+            <img src="https://windows10spotlight.com/wp-content/uploads/valid1.jpg"
+                 srcset="https://windows10spotlight.com/wp-content/uploads/valid1-1920x1080.jpg 1920w"
+                 alt="valid1">
+            <img src="/local/path/image.jpg" alt="local">
+            <img src="https://windows10spotlight.com/wp-content/uploads/valid2.jpg"
+                 srcset="https://windows10spotlight.com/wp-content/uploads/valid2-2560x1440.jpg 2560w"
+                 alt="valid2">
+        </article>
+    </body>
+    </html>
+    """
+    mock_response = Mock()
+    mock_response.text = html_content
+    mock_response.raise_for_status = Mock()
+    mock_get.return_value = mock_response
+
+    result = get_image_info(600)
+
+    # Only wp-content images should be included
+    assert len(result["all_images"]) == 2
+    assert result["all_images"][0]["alt"] == "valid1"
+    assert result["all_images"][1]["alt"] == "valid2"
+
+
+@patch("spotlight.requests.get")
+def test_get_image_info_post_id_extraction(mock_get):
+    """Test invalid post class format and multiple article classes."""
+    html_content = """
+    <html>
+    <body>
+        <article class="post- type-post">
+            <h1>Invalid Post ID</h1>
+            <img src="https://windows10spotlight.com/wp-content/uploads/invalid.jpg"
+                 alt="invalid">
+        </article>
+        <article class="post-abc type-post">
+            <h1>Non-Numeric Post ID</h1>
+            <img src="https://windows10spotlight.com/wp-content/uploads/nonnumeric.jpg"
+                 alt="nonnumeric">
+        </article>
+        <article class="post-other-100 type-post">
+            <h1>Multiple Dashes Post ID</h1>
+            <img src="https://windows10spotlight.com/wp-content/uploads/multidash.jpg"
+                 alt="multidash">
+        </article>
+        <article class="some-class post-200 another-class type-post">
+            <h1>Valid Post With Multiple Classes</h1>
+            <img src="https://windows10spotlight.com/wp-content/uploads/valid.jpg"
+                 srcset="https://windows10spotlight.com/wp-content/uploads/valid-1920x1080.jpg 1920w"
+                 alt="valid">
+        </article>
+    </body>
+    </html>
+    """
+    mock_response = Mock()
+    mock_response.text = html_content
+    mock_response.raise_for_status = Mock()
+    mock_get.return_value = mock_response
+
+    result = get_image_info(999)
+
+    # First article is selected, but post- has no numeric ID
+    # so it falls back to the passed image_id
+    assert result["id"] == 999
+    assert result["title"] == "Invalid Post ID"
+
+
+@pytest.mark.parametrize(
+    "error_type,side_effect",
+    [
+        ("404", Mock(side_effect=requests.exceptions.HTTPError("404 Not Found"))),
+        ("500", Mock(side_effect=requests.exceptions.HTTPError("500 Error"))),
+        ("connection", Mock(side_effect=requests.exceptions.ConnectionError())),
+        ("timeout", Mock(side_effect=requests.exceptions.Timeout())),
+    ],
+)
+@patch("spotlight.requests.get")
+def test_get_image_info_http_errors(mock_get, error_type, side_effect):
+    """Test parameterized HTTP errors: 404, 500, connection, timeout."""
+    mock_response = Mock()
+    mock_response.raise_for_status = side_effect
+    mock_get.return_value = mock_response
+
+    with pytest.raises((requests.exceptions.HTTPError,
+                       requests.exceptions.ConnectionError,
+                       requests.exceptions.Timeout)):
+        get_image_info(12345)
+
+    mock_get.assert_called_once()
+
+
+@patch("spotlight.requests.get")
+def test_get_image_info_url_and_headers(mock_get):
+    """Test URL construction and headers usage."""
+    html_content = """
+    <html>
+    <body>
+        <article class="post-111 type-post">
+            <h1>URL Test</h1>
+        </article>
+    </body>
+    </html>
+    """
+    mock_response = Mock()
+    mock_response.text = html_content
+    mock_response.raise_for_status = Mock()
+    mock_get.return_value = mock_response
+
+    get_image_info(111)
+
+    # Verify URL construction
+    mock_get.assert_called_once()
+    call_args = mock_get.call_args
+    assert call_args[0][0] == "https://windows10spotlight.com/images/111"
+
+    # Verify headers
+    assert "headers" in call_args.kwargs
+    assert call_args.kwargs["headers"] == spotlight.HEADERS
+
+
+@patch("spotlight.requests.get")
+def test_get_image_info_og_metadata(mock_get):
+    """Test multiple OG tags and partial OG tags with missing content."""
+    html_content = """
+    <html>
+    <head>
+        <meta property="og:title" content="OG Title">
+        <meta property="og:image" content="https://example.com/og.jpg">
+        <meta property="og:description" content="OG Description">
+        <meta property="og:url">
+        <meta property="og:type" content="article">
+        <meta property="og:locale" content="en_US">
+    </head>
+    <body>
+        <article class="post-300 type-post">
+            <h1>OG Metadata Test</h1>
+        </article>
+    </body>
+    </html>
+    """
+    mock_response = Mock()
+    mock_response.text = html_content
+    mock_response.raise_for_status = Mock()
+    mock_get.return_value = mock_response
+
+    result = get_image_info(300)
+
+    # Should only include OG tags with content
+    assert result["og_metadata"]["og:title"] == "OG Title"
+    assert result["og_metadata"]["og:image"] == "https://example.com/og.jpg"
+    assert result["og_metadata"]["og:description"] == "OG Description"
+    assert result["og_metadata"]["og:type"] == "article"
+    assert result["og_metadata"]["og:locale"] == "en_US"
+    # og:url without content should not be included
+    assert "og:url" not in result["og_metadata"]
+
+
+@patch("spotlight.requests.get")
+def test_get_image_info_mixed_scenarios(mock_get):
+    """Test mixed srcset/non-srcset images and complex HTML."""
+    html_content = """
+    <html>
+    <head>
+        <meta property="og:title" content="Mixed Scenario">
+    </head>
+    <body>
+        <article class="post-888 type-post">
+            <h1>Complex Mixed Test</h1>
+            <time datetime="2024-04-01T12:00:00Z">April 1, 2024</time>
+            <a href="/tag/landscape" rel="tag">landscape</a>
+            <a href="/tag/nature" rel="tag">nature</a>
+
+            <!-- Image with srcset -->
+            <img src="https://windows10spotlight.com/wp-content/uploads/img1.jpg"
+                 srcset="https://windows10spotlight.com/wp-content/uploads/img1-1920x1080.jpg 1920w,
+                         https://windows10spotlight.com/wp-content/uploads/img1-1280x720.jpg 1280w"
+                 alt="with-srcset">
+
+            <!-- Image without srcset -->
+            <img src="https://windows10spotlight.com/wp-content/uploads/img2.jpg"
+                 alt="without-srcset">
+
+            <!-- Image with only one srcset entry -->
+            <img src="https://windows10spotlight.com/wp-content/uploads/img3.jpg"
+                 srcset="https://windows10spotlight.com/wp-content/uploads/img3-2560x1440.jpg 2560w"
+                 alt="single-srcset">
+        </article>
+    </body>
+    </html>
+    """
+    mock_response = Mock()
+    mock_response.text = html_content
+    mock_response.raise_for_status = Mock()
+    mock_get.return_value = mock_response
+
+    result = get_image_info(888)
+
+    assert result["id"] == 888
+    assert result["title"] == "Complex Mixed Test"
+    assert result["tags"] == ["landscape", "nature"]
+    assert result["date"] == "April 1, 2024"
+    assert result["datetime"] == "2024-04-01T12:00:00Z"
+    assert result["og_metadata"]["og:title"] == "Mixed Scenario"
+
+    # Verify all three images are parsed correctly
+    assert len(result["all_images"]) == 3
+    assert result["all_images"][0]["width"] == 1920
+    assert result["all_images"][0]["alt"] == "with-srcset"
+    assert result["all_images"][1]["width"] is None
+    assert result["all_images"][1]["alt"] == "without-srcset"
+    assert result["all_images"][2]["width"] == 2560
+    assert result["all_images"][2]["alt"] == "single-srcset"
+
+    # Full resolution URL should be first image
+    assert result["full_resolution_url"] == (
+        "https://windows10spotlight.com/wp-content/uploads/img1-1920x1080.jpg"
+    )
