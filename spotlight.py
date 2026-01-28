@@ -1,7 +1,8 @@
 """
 Windows 10 Spotlight wallpaper website scraper library.
 
-Provides functions to fetch and parse wallpaper metadata from windows10spotlight.com
+Provides functions to fetch and parse wallpaper metadata from
+windows10spotlight.com
 """
 
 import requests
@@ -12,7 +13,11 @@ BASE_URL = "https://windows10spotlight.com"
 
 # HTTP headers to avoid being blocked
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
 }
 
 
@@ -123,7 +128,8 @@ def get_image_info(image_id):
             - date: Publication date text
             - datetime: Structured timestamp
             - og_metadata: Open Graph metadata dict
-            - all_images: List of all image URLs found (landscape/portrait variants)
+            - all_images: List of all image URLs found
+              (landscape/portrait variants)
     """
     url = f"{BASE_URL}/images/{image_id}"
     response = requests.get(url, headers=HEADERS)
@@ -186,7 +192,8 @@ def get_image_info(image_id):
                 entry = entry.strip()
                 if not entry:
                     continue
-                parts = entry.rsplit(None, 1)  # Split from right to separate URL and width
+                # Split from right to separate URL and width
+                parts = entry.rsplit(None, 1)
                 if len(parts) == 2:
                     img_url, width_str = parts
                     # Extract numeric width (e.g., "1920w" -> 1920)
